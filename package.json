@@ -1,23 +1,40 @@
 {
   "name": "dsh-asqie-bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Bridge DeepSeek Harness sessions to Time Asqie: remote prompts, live output, questions and approvals from the phone.",
   "type": "module",
   "main": "index.js",
   "exports": {
     ".": "./index.js",
-    "./package.json": "./package.json"
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./icon.svg": "./icon.svg"
   },
   "files": [
     "index.js",
+    "client.js",
     "cordis.patch.yml",
+    "icon.svg",
     "README.md"
   ],
   "license": "MIT",
-  "keywords": ["deepseek-harness", "dsh-plugin", "time-asqie", "remote-control"],
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "time-asqie",
+    "remote-control"
+  ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
     }
-  }
+  },
+  "icon": "./icon.svg"
 }

@@ -11,11 +11,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-export const inject = ['sessionController', 'sessionQuery', 'agents'];
+export const inject = ['sessionController', 'sessionQuery', 'agents', 'webServer'];
 export const name = 'asqie-bridge';
 
 const DEFAULT_API_URL = 'https://api.asqie.pro/api/v1';
-const PLUGIN_VERSION = '0.1.0';
+const PLUGIN_VERSION = '0.2.0';
 
 function logger(message, ...args) {
   console.log(`[asqie-bridge] ${message}`, ...args);
@@ -67,6 +67,54 @@ function loadSettings(config = {}) {
     claimMs,
     maxConcurrent,
   };
+}
+
+function settingsFile() {
+  return path.join(asqieHome(), 'asqie-bridge.json');
+}
+
+function saveSettingsFile(settings) {
+  const payload = {
+    apiUrl: settings.apiUrl,
+    agentToken: settings.agentToken,
+    machineName: settings.machineName,
+    agentName: settings.agentName,
+    autoApprove: settings.autoApprove,
+  };
+  fs.mkdirSync(path.dirname(settingsFile()), { recursive: true });
+  fs.writeFileSync(settingsFile(), `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
+}
+
+function parseJsonBody(request) {
+  return new Promise((resolve, reject) => {
+    let raw = '';
+    request.on('data', (chunk) => {
+      raw += chunk;
+      if (raw.length > 1024 * 1024) {
+        reject(new Error('request body too large'));
+        request.destroy();
+      }
+    });
+    request.on('end', () => {
+      if (raw.trim() === '') return resolve({});
+      try {
+        resolve(JSON.parse(raw));
+      } catch (error) {
+        reject(new Error(`invalid JSON: ${String(error)}`));
+      }
+    });
+    request.on('error', reject);
+  });
+}
+
+function sendJson(response, statusCode, data) {
+  const json = JSON.stringify(data);
+  response.writeHead(statusCode, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(json),
+    'Cache-Control': 'no-store',
+  });
+  response.end(json);
 }
 
 function createHttp(settings) {
@@ -216,12 +264,6 @@ function publicQuestion(question, index) {
 
 export function apply(ctx, config = {}) {
   const settings = loadSettings(config);
-  if (!settings.agentToken) {
-    throw new Error(
-      `asqie-bridge: no Time Asqie agent token. Put {"apiUrl": "...", "agentToken": "asq_...", "machineName": "..."} into ${path.join(asqieHome(), 'asqie-bridge.json')}.`,
-    );
-  }
-
   const client = createHttp(settings);
   const state = {
     agentId: null,
@@ -231,6 +273,9 @@ export function apply(ctx, config = {}) {
     pendingInteractions: new Map(), // externalId -> {resolve, reject, ctx}
     timers: [],
     stopped: false,
+    status: settings.agentToken ? 'starting' : 'unconfigured',
+    lastError: null,
+    lastHeartbeat: null,
   };
 
   // ---------------------------------------------------------------------
@@ -604,11 +649,15 @@ export function apply(ctx, config = {}) {
       if (response?.settings && typeof response.settings.auto_approve_permissions === 'boolean') {
         state.autoApprove = response.settings.auto_approve_permissions;
       }
+      state.status = 'online';
+      state.lastHeartbeat = Date.now();
+      state.lastError = null;
       for (const command of response?.commands || []) {
         await handleCommand(command);
       }
     } catch (error) {
-      warn(`heartbeat failed: ${String(error)}`);
+      state.lastError = error instanceof Error ? error.message : String(error);
+      warn(`heartbeat failed: ${state.lastError}`);
     }
   }
 
@@ -625,7 +674,39 @@ export function apply(ctx, config = {}) {
     }
   }
 
-  async function start() {
+  function stopBridge(reason = 'asqie bridge stopped') {
+    state.stopped = true;
+    for (const timer of state.timers) clearInterval(timer);
+    state.timers = [];
+    for (const pending of state.pendingInteractions.values()) {
+      pending.reject(new Error(reason));
+    }
+    state.pendingInteractions.clear();
+    for (const runCtx of state.activeRuns.values()) {
+      try {
+        runCtx.resolveIdle?.();
+      } catch {
+        // ignore
+      }
+    }
+    state.activeRuns.clear();
+    state.controlledSessions.clear();
+    state.agentId = null;
+  }
+
+  async function startBridge() {
+    stopBridge('asqie bridge restarting');
+    state.stopped = false;
+    state.lastError = null;
+    settings.autoApprove = settings.autoApprove === true;
+
+    if (!settings.agentToken) {
+      state.status = 'unconfigured';
+      logger('not configured yet: open Plugins → Time Asqie Bridge and paste the agent token');
+      return;
+    }
+
+    state.status = 'connecting';
     try {
       const response = await client.register({
         name: settings.agentName,
@@ -637,9 +718,12 @@ export function apply(ctx, config = {}) {
         sessions: await listSessions(),
       });
       state.agentId = response.id;
+      state.status = 'online';
       logger(`registered as agent #${response.id} (${settings.machineName})`);
     } catch (error) {
-      warn(`registration failed: ${String(error)}`);
+      state.status = 'error';
+      state.lastError = error instanceof Error ? error.message : String(error);
+      warn(`registration failed: ${state.lastError}`);
       return;
     }
 
@@ -649,14 +733,100 @@ export function apply(ctx, config = {}) {
     logger('bridge running');
   }
 
-  void start();
+  let restarting = null;
+  function restartBridge() {
+    if (restarting) return restarting;
+    restarting = (async () => {
+      await startBridge();
+    })().finally(() => {
+      restarting = null;
+    });
+    return restarting;
+  }
+
+  function publicConfig() {
+    const token = settings.agentToken || '';
+    return {
+      apiUrl: settings.apiUrl,
+      machineName: settings.machineName,
+      agentName: settings.agentName,
+      autoApprove: settings.autoApprove,
+      hasToken: token !== '',
+      tokenHint: token === '' ? '' : `${token.slice(0, 4)}…${token.slice(-4)}`,
+    };
+  }
+
+  function publicStatus() {
+    return {
+      state: state.status,
+      agentId: state.agentId,
+      lastHeartbeat: state.lastHeartbeat,
+      lastError: state.lastError,
+      activeRuns: state.activeRuns.size,
+    };
+  }
+
+  ctx.effect(() => {
+    return ctx.webServer.register({
+      kind: 'prefix',
+      path: '/api/asqie-bridge',
+      handler: async (request, response) => {
+        try {
+          const url = new URL(request.url || '/', 'http://127.0.0.1');
+          if (request.method === 'GET' && url.pathname === '/api/asqie-bridge/config') {
+            sendJson(response, 200, { ok: true, config: publicConfig(), status: publicStatus() });
+            return;
+          }
+
+          if (request.method === 'GET' && url.pathname === '/api/asqie-bridge/status') {
+            sendJson(response, 200, { ok: true, status: publicStatus() });
+            return;
+          }
+
+          if (request.method === 'POST' && url.pathname === '/api/asqie-bridge/config') {
+            const body = await parseJsonBody(request);
+            const apiUrl = String(body.apiUrl || '').trim().replace(/\/+$/, '');
+            const machineName = String(body.machineName || '').trim();
+            const agentName = String(body.agentName || '').trim();
+            const tokenInput = String(body.agentToken || '').trim();
+
+            if (!/^https?:\/\//i.test(apiUrl)) {
+              sendJson(response, 400, { ok: false, error: 'API URL must start with http:// or https://' });
+              return;
+            }
+            if (machineName === '' || machineName.length > 80) {
+              sendJson(response, 400, { ok: false, error: 'Machine name must be 1–80 characters' });
+              return;
+            }
+            if (tokenInput !== '' && (tokenInput.length < 20 || !tokenInput.startsWith('asq_'))) {
+              sendJson(response, 400, { ok: false, error: 'That does not look like a Time Asqie agent token (asq_…)' });
+              return;
+            }
+
+            settings.apiUrl = apiUrl;
+            settings.machineName = machineName;
+            settings.agentName = agentName || 'DeepSeek Harness';
+            settings.autoApprove = body.autoApprove === true;
+            if (tokenInput !== '') settings.agentToken = tokenInput;
+            saveSettingsFile(settings);
+
+            await restartBridge();
+            sendJson(response, 200, { ok: true, config: publicConfig(), status: publicStatus() });
+            return;
+          }
+
+          sendJson(response, 404, { ok: false, error: 'not found' });
+        } catch (error) {
+          warn(`settings API failed: ${String(error)}`);
+          sendJson(response, 500, { ok: false, error: error instanceof Error ? error.message : String(error) });
+        }
+      },
+    });
+  });
+
+  void startBridge();
 
   ctx.effect(() => () => {
-    state.stopped = true;
-    for (const timer of state.timers) clearInterval(timer);
-    for (const pending of state.pendingInteractions.values()) {
-      pending.reject(new Error('asqie bridge stopped'));
-    }
-    state.pendingInteractions.clear();
+    stopBridge('asqie bridge stopped');
   });
 }

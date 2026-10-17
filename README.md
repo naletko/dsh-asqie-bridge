@@ -29,24 +29,7 @@
 
 ## Установка
 
-1. Создайте агента в Time Asqie: `/timekeeping/settings` → Coding Agents →
-   Add agent. Сохраните токен (`asq_…`).
-2. Положите конфиг в `$DSH_HOME/asqie-bridge.json` (обычно `~/.dsh/`):
-
-   ```json
-   {
-     "apiUrl": "https://api.asqie.pro/api/v1",
-     "agentToken": "asq_...",
-     "machineName": "alex-macbook",
-     "agentName": "Alex MacBook",
-     "autoApprove": true
-   }
-   ```
-
-   Токен и URL можно также задать переменными окружения
-   `ASQIE_API_URL`, `ASQIE_AGENT_TOKEN`, `ASQIE_AGENT_MACHINE`,
-   `ASQIE_AGENT_NAME`.
-3. Установите плагин в профиль:
+1. Установите плагин в профиль:
 
    ```bash
    dsh plugin --profile desktop add github:naletko/dsh-asqie-bridge
@@ -54,7 +37,21 @@
    dsh plugin --profile desktop add link:/path/to/dsh-asqie-bridge
    ```
 
-4. Перезапустите DSH. В логе DSH должно появиться:
+2. Создайте агента в Time Asqie: `/timekeeping/settings` → Coding Agents →
+   Add agent. Скопируйте токен (`asq_…`).
+
+3. Перезапустите DSH и откройте **Plugins → Time Asqie Bridge**. Вставьте:
+   - API URL (`https://api.asqie.pro/api/v1`),
+   - токен агента,
+   - имя машины,
+   - при необходимости выключите авто-апрув.
+
+   Нажмите **Save and connect**. Форма сама сохранит конфиг через хост
+   (`$DSH_HOME/asqie-bridge.json`) и перезапустит подключение — вручную
+   редактировать JSON не нужно. Токен хранится только на этой машине и не
+   возвращается в интерфейс.
+
+4. В логе DSH должно появиться:
 
    ```
    [asqie-bridge] registered as agent #12 (alex-macbook)
@@ -62,6 +59,10 @@
    ```
 
 5. В Time Asqie агент станет online; его сессии появятся в Coding Agents.
+
+Для автоматизации (Docker, CI, несколько профилей) те же значения можно задать
+переменными окружения `ASQIE_API_URL`, `ASQIE_AGENT_TOKEN`,
+`ASQIE_AGENT_MACHINE`, `ASQIE_AGENT_NAME` — они имеют приоритет над файлом.
 
 ## Настройки
 
