@@ -1,0 +1,6 @@
+# Host plugin that connects the running DeepSeek Harness desktop/web session
+# to Time Asqie. Credentials are read from $DSH_HOME/asqie-bridge.json (or the
+# ASQIE_* environment variables), never from this file.
+- insert:
+    - id: asqie-bridge
+      name: 'dsh-asqie-bridge'
